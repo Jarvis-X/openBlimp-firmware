@@ -1,18 +1,14 @@
 /*
 The MIT License (MIT)
-
 Copyright (c) 2018 Wolfgang Hoenig and James Alan Preiss
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
-
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
-
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -24,11 +20,9 @@ SOFTWARE.
 
 /*
 This controller is based on the following publication:
-
 Daniel Mellinger, Vijay Kumar:
 Minimum snap trajectory generation and control for quadrotors.
 IEEE International Conference on Robotics and Automation (ICRA), 2011.
-
 We added the following:
  * Integral terms (compensates for: battery voltage drop over time, unbalanced center of mass due to asymmmetries, and uneven wear on propellers and motors)
  * D-term for angular velocity
@@ -43,9 +37,11 @@ We added the following:
 #include "position_controller.h"
 #include "controller_mellinger.h"
 #include "physicalConstants.h"
+#include "debug.h"
 
 static float g_vehicleMass = CF_MASS;
 static float massThrust = 132000;
+// static int counter = 0;
 
 // XY Position PID
 static float kp_xy = 0.4;       // P
@@ -60,19 +56,19 @@ static float ki_z = 0.05;       // I
 static float i_range_z  = 0.4;
 
 // Attitude
-static float kR_xy = 70000; // P
-static float kw_xy = 20000; // D
+static float kR_xy = 0.3; // P
+static float kw_xy = 0.15; // D
 static float ki_m_xy = 0.0; // I
 static float i_range_m_xy = 1.0;
 
 // Yaw
-static float kR_z = 60000; // P
-static float kw_z = 12000; // D
-static float ki_m_z = 500; // I
-static float i_range_m_z  = 1500;
+static float kR_z = 20000; // P
+static float kw_z = 8000; // D
+static float ki_m_z = 100; // I
+static float i_range_m_z  = 700;
 
 // roll and pitch angular velocity
-static float kd_omega_rp = 200; // D
+static float kd_omega_rp = 0.1; // D
 
 
 // Helper variables
@@ -130,10 +126,16 @@ void controllerMellinger(control_t *control, setpoint_t *setpoint,
   struct vec v_error;
   struct vec target_thrust;
   struct vec z_axis;
+  struct vec x_axis;
+  struct vec y_axis;
   float current_thrust;
+  float current_thrust_x;
+  float current_thrust_y;
+  struct mat33 R_des;
   struct vec x_axis_desired;
   struct vec y_axis_desired;
-  struct vec x_c_des;
+  struct vec z_axis_desired;
+  // struct vec x_c_des;
   struct vec eR, ew, M;
   float dt;
   float desiredYaw = 0; //deg
@@ -196,6 +198,8 @@ void controllerMellinger(control_t *control, setpoint_t *setpoint,
   struct quat q = mkquat(state->attitudeQuaternion.x, state->attitudeQuaternion.y, state->attitudeQuaternion.z, state->attitudeQuaternion.w);
   struct mat33 R = quat2rotmat(q);
   z_axis = mcolumn(R, 2);
+  x_axis = mcolumn(R, 0);
+  y_axis = mcolumn(R, 1);
 
   // yaw correction (only if position control is not used)
   if (setpoint->mode.x != modeAbs) {
@@ -207,38 +211,21 @@ void controllerMellinger(control_t *control, setpoint_t *setpoint,
     target_thrust = mvmul(R_yaw_only, target_thrust);
   }
 
-  // Current thrust [F]
+  // desired thrust [F] in {B}
   current_thrust = vdot(target_thrust, z_axis);
+  current_thrust_x = vdot(target_thrust, x_axis);
+  current_thrust_y = vdot(target_thrust, y_axis);
 
-  // Calculate axis [zB_des]
-  z_axis_desired = vnormalize(target_thrust);
-
-  // [xC_des]
-  // x_axis_desired = z_axis_desired x [sin(yaw), cos(yaw), 0]^T
-  x_c_des.x = cosf(radians(desiredYaw));
-  x_c_des.y = sinf(radians(desiredYaw));
-  x_c_des.z = 0;
-  // [yB_des]
-  y_axis_desired = vnormalize(vcross(z_axis_desired, x_c_des));
-  // [xB_des]
-  x_axis_desired = vcross(y_axis_desired, z_axis_desired);
+  // this thing works for compensating the tilting and yaw
+  R_des = quat2rotmat(rpy2quat(mkvec(0, 0, radians(desiredYaw))));
+  z_axis_desired = mcolumn(R_des, 2);
+  x_axis_desired = mcolumn(R_des, 0);
+  y_axis_desired = mcolumn(R_des, 1);
+  //
+  // // Calculate axis [zB_des]
+  // z_axis_desired = vnormalize(target_thrust);
 
   // [eR]
-  // Slow version
-  // struct mat33 Rdes = mcolumns(
-  //   mkvec(x_axis_desired.x, x_axis_desired.y, x_axis_desired.z),
-  //   mkvec(y_axis_desired.x, y_axis_desired.y, y_axis_desired.z),
-  //   mkvec(z_axis_desired.x, z_axis_desired.y, z_axis_desired.z));
-
-  // struct mat33 R_transpose = mtranspose(R);
-  // struct mat33 Rdes_transpose = mtranspose(Rdes);
-
-  // struct mat33 eRM = msub(mmult(Rdes_transpose, R), mmult(R_transpose, Rdes));
-
-  // eR.x = eRM.m[2][1];
-  // eR.y = -eRM.m[0][2];
-  // eR.z = eRM.m[1][0];
-
   // Fast version (generated using Mathematica)
   float x = q.x;
   float y = q.y;
@@ -248,23 +235,24 @@ void controllerMellinger(control_t *control, setpoint_t *setpoint,
   eR.y = x_axis_desired.z - z_axis_desired.x - 2*(fsqr(x)*x_axis_desired.z + y*(x_axis_desired.z*y - x_axis_desired.y*z) - (fsqr(y) + fsqr(z))*z_axis_desired.x + x*(-(x_axis_desired.x*z) + y*z_axis_desired.y + z*z_axis_desired.z) + w*(x*x_axis_desired.y + z*z_axis_desired.y - y*(x_axis_desired.x + z_axis_desired.z)));
   eR.z = y_axis_desired.x - 2*(y*(x*x_axis_desired.x + y*y_axis_desired.x - x*y_axis_desired.y) + w*(x*x_axis_desired.z + y*y_axis_desired.z)) + 2*(-(x_axis_desired.z*y) + w*(x_axis_desired.x + y_axis_desired.y) + x*y_axis_desired.z)*z - 2*y_axis_desired.x*fsqr(z) + x_axis_desired.y*(-1 + 2*fsqr(x) + 2*fsqr(z));
 
-  // Account for Crazyflie coordinate system
+  eR.x = -eR.x;
   eR.y = -eR.y;
+  eR.z = -eR.z;
 
   // [ew]
   float err_d_roll = 0;
   float err_d_pitch = 0;
 
   float stateAttitudeRateRoll = radians(sensors->gyro.x);
-  float stateAttitudeRatePitch = -radians(sensors->gyro.y);
+  float stateAttitudeRatePitch = radians(sensors->gyro.y);
   float stateAttitudeRateYaw = radians(sensors->gyro.z);
 
   ew.x = radians(setpoint->attitudeRate.roll) - stateAttitudeRateRoll;
-  ew.y = -radians(setpoint->attitudeRate.pitch) - stateAttitudeRatePitch;
+  ew.y = radians(setpoint->attitudeRate.pitch) - stateAttitudeRatePitch;
   ew.z = radians(setpoint->attitudeRate.yaw) - stateAttitudeRateYaw;
   if (prev_omega_roll == prev_omega_roll) { /*d part initialized*/
     err_d_roll = ((radians(setpoint->attitudeRate.roll) - prev_setpoint_omega_roll) - (stateAttitudeRateRoll - prev_omega_roll)) / dt;
-    err_d_pitch = (-(radians(setpoint->attitudeRate.pitch) - prev_setpoint_omega_pitch) - (stateAttitudeRatePitch - prev_omega_pitch)) / dt;
+    err_d_pitch = ((radians(setpoint->attitudeRate.pitch) - prev_setpoint_omega_pitch) - (stateAttitudeRatePitch - prev_omega_pitch)) / dt;
   }
   prev_omega_roll = stateAttitudeRateRoll;
   prev_omega_pitch = stateAttitudeRatePitch;
@@ -272,38 +260,52 @@ void controllerMellinger(control_t *control, setpoint_t *setpoint,
   prev_setpoint_omega_pitch = radians(setpoint->attitudeRate.pitch);
 
   // Integral Error
-  i_error_m_x += (-eR.x) * dt;
+  i_error_m_x += eR.x * dt;
   i_error_m_x = clamp(i_error_m_x, -i_range_m_xy, i_range_m_xy);
 
-  i_error_m_y += (-eR.y) * dt;
+  i_error_m_y += eR.y * dt;
   i_error_m_y = clamp(i_error_m_y, -i_range_m_xy, i_range_m_xy);
 
-  i_error_m_z += (-eR.z) * dt;
+  i_error_m_z += eR.z * dt;
   i_error_m_z = clamp(i_error_m_z, -i_range_m_z, i_range_m_z);
 
   // Moment:
-  M.x = -kR_xy * eR.x + kw_xy * ew.x + ki_m_xy * i_error_m_x + kd_omega_rp * err_d_roll;
-  M.y = -kR_xy * eR.y + kw_xy * ew.y + ki_m_xy * i_error_m_y + kd_omega_rp * err_d_pitch;
-  M.z = -kR_z  * eR.z + kw_z  * ew.z + ki_m_z  * i_error_m_z;
+  M.x = kR_xy * eR.x + kw_xy * ew.x + ki_m_xy * i_error_m_x + kd_omega_rp * err_d_roll;
+  M.y = kR_xy * eR.y + kw_xy * ew.y + ki_m_xy * i_error_m_y + kd_omega_rp * err_d_pitch;
+  M.z = kR_z  * eR.z + kw_z  * ew.z + ki_m_z  * i_error_m_z;
+
+  M.x = clamp(M.x, -0.2, 0.2);
+  M.y = clamp(M.y, -0.2, 0.2);
+
+  struct mat33 R_c_T = mtranspose(quat2rotmat(rpy2quat(mkvec(M.x, M.y, 0))));
+  struct vec compensated_fb = mvmul(R_c_T, mkvec(current_thrust_x, current_thrust_y, current_thrust));
+  // if (counter <= 500){
+  //   counter++;
+  // } else {
+  //   DEBUG_PRINT("Mx=%f, My=%f, Mz=%f\n",
+  //               (double) M.x,
+  //               (double) M.y,
+  //               (double) M.z);
+  //   counter = 0;
+  // }
 
   // Output
   if (setpoint->mode.z == modeDisable) {
     control->thrust = setpoint->thrust;
   } else {
-    control->thrust = massThrust * current_thrust;
+    control->thrust = massThrust * compensated_fb.z;
   }
 
   cmd_thrust = control->thrust;
   r_roll = radians(sensors->gyro.x);
-  r_pitch = -radians(sensors->gyro.y);
+  r_pitch = radians(sensors->gyro.y);
   r_yaw = radians(sensors->gyro.z);
   accelz = sensors->acc.z;
 
   if (control->thrust > 0) {
-    control->roll = clamp(M.x, -32000, 32000);
-    control->pitch = clamp(M.y, -32000, 32000);
-    control->yaw = clamp(-M.z, -32000, 32000);
-
+    control->roll = clamp(massThrust*compensated_fb.x, -16000, 16000);
+    control->pitch = clamp(massThrust*compensated_fb.y, -16000, 16000);
+    control->yaw = clamp(M.z, -16000, 16000);
     cmd_roll = control->roll;
     cmd_pitch = control->pitch;
     cmd_yaw = control->yaw;
