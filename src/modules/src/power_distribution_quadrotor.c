@@ -55,12 +55,13 @@ bool powerDistributionTest(void)
 
 void powerDistribution(motors_thrust_t* motorPower, const control_t *control)
 {
-  int16_t r = control->roll / 2.0f;
-  int16_t p = control->pitch / 2.0f;
-  motorPower->m1 = limitThrust(control->thrust - r + p + control->yaw);
-  motorPower->m2 = limitThrust(control->thrust - r - p - control->yaw);
-  motorPower->m3 =  limitThrust(control->thrust + r - p + control->yaw);
-  motorPower->m4 =  limitThrust(control->thrust + r + p - control->yaw);
+  int16_t r = control->roll;
+  int16_t p = control->pitch;
+  int16_t y = control->yaw;
+  motorPower->m1 = limitThrust(control->thrust - r - p - y);
+  motorPower->m2 = limitThrust(control->thrust + r - p + y);
+  motorPower->m3 = limitThrust(control->thrust + r + p - y);
+  motorPower->m4 = limitThrust(control->thrust - r + p + y);
 
   if (motorPower->m1 < idleThrust) {
     motorPower->m1 = idleThrust;
